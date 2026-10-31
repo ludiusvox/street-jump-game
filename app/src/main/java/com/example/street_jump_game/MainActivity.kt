@@ -5,8 +5,10 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.media.MediaPlayer
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -16,7 +18,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DarkMode
@@ -93,9 +94,51 @@ val ROUTINES = listOf(
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, SensorEventListener {
 
+    private val PREFS_NAME = "street_jump_prefs"
+    private val KEY_JUMP_THRESHOLD = "jump_threshold"
+    private val KEY_JUMP_COOLDOWN = "jump_cooldown"
+
     private lateinit var tts: TextToSpeech
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
+    private var mediaPlayer: MediaPlayer? = null
+
+    // Cartesia Sonic Pre-recorded Voice Messages Mapping
+    private val audioMap: Map<String, Int> by lazy {
+        mapOf(
+            "Starting The Classic Hopscotch." to R.raw.start_classic_hopscotch,
+            "Starting The Centurion's March." to R.raw.start_centurions_march,
+            "Starting The Shield-Bearer's Lunge." to R.raw.start_shield_bearers_lunge,
+            "Starting The Skater's Evasion." to R.raw.start_skaters_evasion,
+            "Starting The Phalanx Shuffle." to R.raw.start_phalanx_shuffle,
+            "Starting The One-Legged Scout." to R.raw.start_one_legged_scout,
+            "Starting Hot Coals." to R.raw.start_hot_coals,
+            "Starting The Tactical Retreat." to R.raw.start_tactical_retreat,
+            "Starting The Siege Tower." to R.raw.start_siege_tower,
+            "Starting The Gladiator's Gauntlet." to R.raw.start_gladiators_gauntlet,
+            "Right foot" to R.raw.inst_right_foot,
+            "Both feet" to R.raw.inst_both_feet,
+            "Left foot" to R.raw.inst_left_foot,
+            "Jump forward two squares" to R.raw.inst_jump_forward_two_squares,
+            "Hold" to R.raw.inst_hold,
+            "Deep lunge right" to R.raw.inst_deep_lunge_right,
+            "Deep lunge left" to R.raw.inst_deep_lunge_left,
+            "Bound to right column" to R.raw.inst_bound_to_right_column,
+            "Bound to left column" to R.raw.inst_bound_to_left_column,
+            "Two squares forward" to R.raw.inst_two_squares_forward,
+            "One square back" to R.raw.inst_one_square_back,
+            "Hop right foot" to R.raw.inst_hop_right_foot,
+            "Keep balancing" to R.raw.inst_keep_balancing,
+            "Rapid right" to R.raw.inst_rapid_right,
+            "Rapid left" to R.raw.inst_rapid_left,
+            "Hop backwards" to R.raw.inst_hop_backwards,
+            "High vertical jump" to R.raw.inst_high_vertical_jump,
+            "Long broad jump" to R.raw.inst_long_broad_jump,
+            "Jump forward" to R.raw.inst_jump_forward,
+            "Drop for burpee" to R.raw.inst_drop_for_burpee,
+            "Workout Finished. Great job." to R.raw.finish_workout
+        )
+    }
 
     // App State (Hosted in Activity so it survives tab switching)
     private var isWorkoutActive by mutableStateOf(false)
@@ -113,15 +156,19 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, SensorEve
     private lateinit var dbHelper: DatabaseHelper
     private var savedWorkouts by mutableStateOf<List<WorkoutSession>>(emptyList())
 
-    // Physics
+    // Physics & Detector Cooldown
     private var currentAcceleration = SensorManager.GRAVITY_EARTH
     private var lastAcceleration = SensorManager.GRAVITY_EARTH
-    private var jumpThreshold by mutableFloatStateOf(14f)
+    private var jumpThreshold by mutableFloatStateOf(9.0f) // Threshold tuned to 9.0 for physical body jump motion
+    private var lastJumpTimestamp = 0L
+    private var jumpCooldownMs by mutableLongStateOf(450L) // 450ms cooldown prevents multijumping
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         
+        loadSettings()
+
         tts = TextToSpeech(this, this)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -139,6 +186,20 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, SensorEve
         }
     }
 
+    private fun loadSettings() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        jumpThreshold = prefs.getFloat(KEY_JUMP_THRESHOLD, 9.0f)
+        jumpCooldownMs = prefs.getLong(KEY_JUMP_COOLDOWN, 450L)
+    }
+
+    private fun saveSettings() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putFloat(KEY_JUMP_THRESHOLD, jumpThreshold)
+            .putLong(KEY_JUMP_COOLDOWN, jumpCooldownMs)
+            .apply()
+    }
+
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts.language = Locale.US
@@ -147,6 +208,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, SensorEve
 
     override fun onSensorChanged(event: SensorEvent?) {
         if (event != null && isWorkoutActive) {
+            val currentTime = System.currentTimeMillis()
             val x = event.values[0]
             val y = event.values[1]
             val z = event.values[2]
@@ -155,8 +217,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, SensorEve
             currentAcceleration = sqrt((x * x + y * y + z * z).toDouble()).toFloat()
             val delta = currentAcceleration - lastAcceleration
 
-            if (delta > jumpThreshold) {
+            if (delta > jumpThreshold && (currentTime - lastJumpTimestamp) > jumpCooldownMs) {
                 jumpCount++
+                lastJumpTimestamp = currentTime
             }
         }
     }
@@ -164,10 +227,33 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, SensorEve
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     private fun speakOut(text: String) {
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "")
+        val resId = audioMap[text]
+        if (resId != null) {
+            try {
+                mediaPlayer?.stop()
+                mediaPlayer?.release()
+                mediaPlayer = MediaPlayer.create(this, resId)?.apply {
+                    setOnCompletionListener { mp ->
+                        mp.release()
+                        if (mediaPlayer == mp) {
+                            mediaPlayer = null
+                        }
+                    }
+                    start()
+                }
+            } catch (_: Exception) {
+                tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "")
+            }
+        } else {
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "")
+        }
     }
 
     override fun onDestroy() {
+        mediaPlayer?.stop()
+        mediaPlayer?.release()
+        mediaPlayer = null
+
         if (::tts.isInitialized) {
             tts.stop()
             tts.shutdown()
@@ -428,22 +514,54 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, SensorEve
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Accelerometer Settings
+            // Accelerometer & Physics Settings
             Text("Hardware Settings", fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(8.dp))
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("Jump Force Threshold: ${String.format(Locale.US, "%.1f", jumpThreshold)}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
                     Text(
-                        "Lower value = more sensitive (light steps count). Higher value = requires heavy stomps.", 
+                        "Optimal threshold range: 5.0 - 15.0 (Default: 9.0). Lower = more sensitive.", 
                         style = MaterialTheme.typography.bodySmall, 
                         modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
                     )
                     Slider(
                         value = jumpThreshold,
-                        onValueChange = { jumpThreshold = it },
-                        valueRange = 10f..30f
+                        onValueChange = { 
+                            jumpThreshold = it
+                            saveSettings()
+                        },
+                        valueRange = 5f..15f
                     )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text("Detector Cooldown: $jumpCooldownMs ms", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
+                    Text(
+                        "Prevents multijumping by requiring a minimum delay between detected jumps (Default: 450 ms).", 
+                        style = MaterialTheme.typography.bodySmall, 
+                        modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+                    )
+                    Slider(
+                        value = jumpCooldownMs.toFloat(),
+                        onValueChange = { 
+                            jumpCooldownMs = it.toLong()
+                            saveSettings()
+                        },
+                        valueRange = 200f..1000f
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Button(
+                        onClick = {
+                            saveSettings()
+                            Toast.makeText(this@MainActivity, "Settings Saved!", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("SAVE SETTINGS", fontWeight = FontWeight.Bold)
+                    }
                 }
             }
 
